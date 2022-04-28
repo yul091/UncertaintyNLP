@@ -28,34 +28,38 @@ def evaluator(dataloader, model, args, Mahala=None, use_transform=False):
         # Forward pass, calculate logit predictions
             if args.model != 'bert':
                 res = model(b_input_ids) 
-                logits = res[1] # B X V
-                # Transform representations (mahalanobis dist + winning score)
-                if use_transform and Mahala is not None:
-                    hiddens = res[0]
-                    score_list, x_list = [], []
-                    # Caculate winning score
-                    softmax = F.softmax(logits, dim=1).detach().cpu() # B X V
-                    winning_scores = torch.max(softmax, dim=1)[0] # B
-                    for sample_idx in range(args.n_samples):
-                        x_init = (hiddens + torch.zeros_like(hiddens).uniform_(args.epsilon_x, args.epsilon_x)).detach().cpu() # B X H
-                        scores = Mahala._uncertainty_calculate(x_init) + winning_scores # B
-                        x_list.append(x_init) # list of (B X H)
-                        score_list.append(scores.unsqueeze(0)) # list of (1 X B)
-
-                    # Select representations that produce minimum uncertainty
-                    score_list = torch.cat(score_list, dim=0) # n_samples X B
-                    max_idx = torch.max(score_list, dim=0)[1] # B
-                    trans_hiddens = [x_list[idx][i].unsqueeze(0) for i, idx in enumerate(max_idx)] # list of (1 X H)
-                    trans_hiddens = torch.cat(trans_hiddens, dim=0).to(args.device) # B X H
-                    logits = model.fc(trans_hiddens) # B X V
+                hiddens, logits = res[0], res[1] # B X H, B X V
             else:
-                res = model(b_input_ids, token_type_ids=None, attention_mask=b_input_mask)
-                logits = res[0] # B X V
-                # bsize = b_input_ids.shape[0]
-                # hiddens = model.get_input_embeddings()(b_input_ids).view(bsize, -1) # B X (T*H) 
+                hiddens = model.model1.bert(b_input_ids, attention_mask=b_input_mask)[1]
+                hiddens = model.model1.dropout(hiddens) # B X H
+                logits = model.model1.classifier(hiddens) # B X V
 
-            logits_list.append(logits)
-            labels_list.append(b_labels)
+            # Transform representations (mahalanobis dist + winning score)
+            if use_transform and Mahala is not None:
+                # print("Generating transformed feature representation ...")
+                score_list, x_list = [], []
+                # Caculate winning score
+                softmax = F.softmax(logits, dim=1).detach().cpu() # B X V
+                winning_scores = torch.max(softmax, dim=1)[0] # B
+                for sample_idx in range(args.n_samples):
+                    x_init = (hiddens + torch.zeros_like(hiddens).uniform_(args.epsilon_x, args.epsilon_x)).detach().cpu() # B X H 
+                    scores = Mahala._uncertainty_calculate(x_init) + winning_scores # B
+                    x_list.append(x_init) # list of (B X H)
+                    score_list.append(scores.unsqueeze(0)) # list of (1 X B)
+
+                # Select representations that produce minimum uncertainty
+                score_list = torch.cat(score_list, dim=0) # n_samples X B
+                max_idx = torch.max(score_list, dim=0)[1] # B
+                trans_hiddens = [x_list[idx][i].unsqueeze(0) for i, idx in enumerate(max_idx)] # list of (1 X H)
+                trans_hiddens = torch.cat(trans_hiddens, dim=0).to(args.device) # B X H
+                if args.model != 'bert':
+                    logits = model.fc(trans_hiddens) # B X V
+                else:
+                    logits = model.model1.classifier(trans_hiddens) # B X V
+
+
+        logits_list.append(logits)
+        labels_list.append(b_labels)
         # Move logits and labels to CPU
         logits = logits.detach().cpu().numpy()
         label_ids = b_labels.cpu().numpy()
@@ -135,12 +139,17 @@ def Trainer(train_dataloader,
                     hiddens2, logits2 = res[2], res[3] # B X H, B X V
                     loss_ce2 = F.cross_entropy(logits2, b_labels)
             else:
-                res = model(b_input_ids, token_type_ids=None, attention_mask=b_input_mask, labels=b_labels)
-                loss_ce, logits = res[0], res[1] # B X H, B X V
-                bsize = b_input_ids.shape[0]
-                hiddens = model.get_input_embeddings()(b_input_ids).view(bsize, -1) # B X (T*H)
-                if args.ensemble:
-                    loss_ce2, hiddens2 = res[2], res[3] # B X H, B X V
+                if not args.ensemble:
+                    res1 = model(b_input_ids, token_type_ids=None, attention_mask=b_input_mask, labels=b_labels)
+                else:
+                    res1, res2 = model(b_input_ids, token_type_ids=None, attention_mask=b_input_mask, labels=b_labels)
+                    loss_ce2, logits2 = res2[0], res2[1] # B X H, B X V
+                    hiddens2 = model.model2.bert(b_input_ids, attention_mask=b_input_mask)[1]
+                    hiddens2 = model.model2.dropout(hiddens2) # B X H
+
+                loss_ce, logits = res1[0], res1[1] # B X H, B X V
+                hiddens = model.model1.bert(b_input_ids, attention_mask=b_input_mask)[1]
+                hiddens = model.model1.dropout(hiddens) # B X H
 
             if torch.cuda.device_count() > 1:
                 loss_ce = loss_ce.mean()
@@ -189,6 +198,15 @@ def Trainer(train_dataloader,
             if args.model != 'bert':
                 torch.save(model.state_dict(), os.path.join(dirname, model_save))
             else:
+                if not args.ensemble and args.coeff == 0:
+                    dirname = os.path.join(dirname, 'basic')
+                elif args.ensemble and args.coeff == 0:
+                    dirname = os.path.join(dirname, 'ensemble')
+                elif not args.ensemble and args.coeff != 0:
+                    dirname = os.path.join(dirname, 'metric')
+                else:
+                    dirname = os.path.join(dirname, 'metric-ensemble')
+
                 model_to_save = model.module if hasattr(model, 'module') else model 
                 model_to_save.save_pretrained(dirname)   
 

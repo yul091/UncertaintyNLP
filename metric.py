@@ -115,7 +115,7 @@ class Mahalanobis:
 
     def train_logic(self):
         train_scores = self.mahalanobis_dist(self.train_dataloader, is_train=True) # N
-        train_scores = train_scores.reshape([-1, self.hidden_num]) # N X 1
+        train_scores = train_scores.reshape(-1, self.hidden_num) # N X 1
         lr = LogisticRegression(C=1.0, penalty='l2', tol=0.01)
         lr.fit(train_scores, self.train_gt)
         print(lr.score(train_scores, self.train_gt))
@@ -127,11 +127,11 @@ class Mahalanobis:
         for target in range(self.class_num): # for class i
             fx_tar = fx[torch.where(y == target)] # all features in class i -> B' X H
             mean_val = torch.mean(fx_tar.float(), dim = 0) # mu i -> H
-            std_val = (fx_tar - mean_val).T.mm(fx_tar - mean_val) # sigma i -> H X H
+            std_val = (fx_tar - mean_val).transpose(-2,-1) @ (fx_tar - mean_val) # sigma i -> H X H
             u_list.append(mean_val)
             std_list.append(std_val)
 
-        std_inverse = torch.inverse(sum(std_list) / len(y))
+        std_inverse = torch.inverse(sum(std_list) / len(y)) # H X H
         return u_list, std_inverse, fx, gt.numpy()
 
     def get_feature(self, data_loader):
@@ -147,10 +147,9 @@ class Mahalanobis:
                     res = self.model(b_input_ids) 
                     hiddens, logits = res[0], res[1] # B X H, B X V
                 else:
-                    res = self.model(b_input_ids, token_type_ids=None, attention_mask=b_input_mask)
-                    logits = res[0] # B X V
-                    bsize = b_input_ids.shape[0]
-                    hiddens = self.model.get_input_embeddings()(b_input_ids).view(bsize, -1) # B X (T*H) 
+                    hiddens = self.model.model1.bert(b_input_ids, attention_mask=b_input_mask)[1]
+                    hiddens = self.model.model1.dropout(hiddens) # B X H
+                    logits = self.model.model1.classifier(hiddens) # B X V
 
                 # Calculate ground truth
                 preds = torch.max(logits, dim=1)[1] # B
@@ -166,7 +165,6 @@ class Mahalanobis:
         return torch.cat(fx, dim=0), torch.cat(y_list, dim=0), torch.cat(gt_list, dim=0)
 
 
-
     def mahalanobis_dist(self, data_loader, is_train=False):
         """
         Calculate mahalanobis distance: max_{c}{(f(x)-mu_c) sigma (f(x)-mu_c)},
@@ -178,7 +176,7 @@ class Mahalanobis:
             fx, _ = self.get_feature(data_loader) # N X H
         score = []
         for target in range(self.class_num): # for each class
-            tmp = (fx - self.u_list[target]) @ self.std_inverse @ (fx - self.u_list[target]).T # N X N
+            tmp = (fx - self.u_list[target]) @ self.std_inverse @ (fx - self.u_list[target]).transpose(-2, -1) # N X N
             tmp = tmp.diagonal().reshape([-1, 1]) # N X 1
             score.append(-tmp)
 
@@ -187,9 +185,12 @@ class Mahalanobis:
         return score
 
     def _uncertainty_calculate(self, fx):
+        """
+        fx (B X H / B X T X H): feature representations of RNN / transformers.
+        """
         score = []
         for target in range(self.class_num): # for each class
-            tmp = (fx - self.u_list[target]) @ self.std_inverse @ (fx - self.u_list[target]).T # N X N
+            tmp = (fx - self.u_list[target]) @ self.std_inverse @ (fx - self.u_list[target]).transpose(-2, -1) # N X N
             tmp = tmp.diagonal().reshape([-1, 1]) # N X 1
             score.append(-tmp)
 

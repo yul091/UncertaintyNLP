@@ -6,8 +6,9 @@ from utils import set_seed
 from metric import Mahalanobis
 from preprocess import process_data
 from RNN import BiGRUForSequenceClassification
-from transformers import BertForSequenceClassification
+from bert import BertEnsembleModel
 from trainer import Trainer, evaluator
+from transformers import AutoConfig
 
 
 def main():
@@ -83,11 +84,16 @@ def main():
     # Define model
     if args.model == 'bert':
         # Load pre-trained model
-        model = BertForSequenceClassification.from_pretrained(
-            "bert-base-uncased",
-            num_labels=num_labels,
+        config = AutoConfig.from_pretrained(
+            "bert-base-uncased", 
+            num_labels=num_labels, 
             output_hidden_states=True,
-        ) 
+        )
+        model = BertEnsembleModel(
+            "bert-base-uncased",  
+            config=config, 
+            args=args,
+        )
     else:
         model = BiGRUForSequenceClassification(
             tokenizer=tokenizer, 
@@ -113,24 +119,36 @@ def main():
             dirname=output_dir,
             num_labels=num_labels,
         )
-    else:
-        # Load checkpoint
-        if args.model == 'rnn':
-            model_save = os.listdir(output_dir)[-1]
-            ckpt_path = os.path.join(output_dir, model_save)
-            model.load_state_dict(torch.load(ckpt_path))
+    
+    # Load checkpoint
+    if args.model == 'rnn':
+        # model_save = os.listdir(output_dir)[-1]
+        # Define saved model name
+        if not args.ensemble and args.coeff == 0:
+            model_save = 'model.pt'
+        elif args.ensemble and args.coeff == 0:
+            model_save = 'model-ensemble1.0.pt'
+        elif not args.ensemble and args.coeff != 0:
+            model_save = 'model-metric.pt'
         else:
-            model = BertForSequenceClassification.from_pretrained(
-                output_dir,
-                num_labels=num_labels,
-                output_hidden_states=True,
-            ) 
-        # Evaluate
-        eval_accuracy, ece = evaluator(validation_dataloader, model, args)
-        print("(normal) val acc: {:.4f}, val ECE: {:.4f}".format(eval_accuracy, ece))
-        eval_accuracy, ece = evaluator(prediction_dataloader, model, args)
-        print("(normal) test acc: {:.4f}, test ECE: {:.4f}".format(eval_accuracy, ece))
+            model_save = 'model-ensemble-metric.pt'
+
+        ckpt_path = os.path.join(output_dir, model_save)
+        model.load_state_dict(torch.load(ckpt_path))
+    else:
+        model = BertEnsembleModel(
+            output_dir, # checkpoint dir
+            config=config, 
+            args=args,
+        )
+        model.to(device)
         
+    
+    # Evaluate
+    eval_accuracy, ece = evaluator(validation_dataloader, model, args)
+    print("(normal) val acc: {:.4f}, val ECE: {:.4f}".format(eval_accuracy, ece))
+    eval_accuracy, ece = evaluator(prediction_dataloader, model, args)
+    print("(normal) test acc: {:.4f}, test ECE: {:.4f}".format(eval_accuracy, ece))
 
     # Test transform
     MD = Mahalanobis(train_dataloader, model, num_labels, args)
