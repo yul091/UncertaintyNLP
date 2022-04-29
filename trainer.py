@@ -3,7 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
-from metric import accurate_nb, ECE, multiclass_metric_loss
+from metric import accurate_nb, ECE, multiclass_metric_loss, calculate_F1
 
 
 def evaluator(dataloader, model, args, Mahala=None, use_transform=False):
@@ -57,14 +57,13 @@ def evaluator(dataloader, model, args, Mahala=None, use_transform=False):
                 else:
                     logits = model.model1.classifier(trans_hiddens) # B X V
 
-
-        logits_list.append(logits)
-        labels_list.append(b_labels)
         # Move logits and labels to CPU
-        logits = logits.detach().cpu().numpy()
-        label_ids = b_labels.cpu().numpy()
+        logits = logits.detach().cpu()
+        label_ids = b_labels.cpu()
+        logits_list.append(logits)
+        labels_list.append(label_ids)
         # Calculate predicting accuracy
-        tmp_eval_nb = accurate_nb(logits, label_ids)
+        tmp_eval_nb = accurate_nb(logits.numpy(), label_ids.numpy())
         eval_accurate_nb += tmp_eval_nb
         nb_eval_examples += label_ids.shape[0]
         
@@ -72,10 +71,11 @@ def evaluator(dataloader, model, args, Mahala=None, use_transform=False):
     logits_ece = torch.cat(logits_list)
     labels_ece = torch.cat(labels_list)
     ece = ece_criterion(logits_ece, labels_ece).item()
+    macro_f1 = calculate_F1(logits_ece.numpy(), labels_ece.numpy(), average='macro')
+    weighted_f1 = calculate_F1(logits_ece.numpy(), labels_ece.numpy(), average='weighted')
 
-    return eval_accuracy, ece
-
-
+    return eval_accuracy, ece, macro_f1, weighted_f1
+    
 
 
 def Trainer(train_dataloader, 
@@ -109,6 +109,17 @@ def Trainer(train_dataloader,
         model_save = 'model-metric{}.pt'.format(args.coeff)
     else:
         model_save = 'model-ensemble{}-metric{}.pt'.format(args.cross_rate, args.coeff)
+
+    # Define saved model dir for bert
+    if args.model == 'bert':
+        if not args.ensemble and args.coeff == 0:
+            dirname = os.path.join(dirname, 'basic')
+        elif args.ensemble and args.coeff == 0:
+            dirname = os.path.join(dirname, 'ensemble')
+        elif not args.ensemble and args.coeff != 0:
+            dirname = os.path.join(dirname, 'metric')
+        else:
+            dirname = os.path.join(dirname, 'metric-ensemble')
 
     # Store our loss and accuracy for plotting
     best_val = -np.inf
@@ -186,9 +197,9 @@ def Trainer(train_dataloader,
         print("train CE loss: {}".format(tr_loss/nb_tr_steps))
 
         # Evaluate on validation data
-        eval_accuracy, ece = evaluator(validation_dataloader, model, args)
+        eval_accuracy, ece, macro_f1, weighted_f1 = evaluator(validation_dataloader, model, args)
         scheduler.step(eval_accuracy) # Adjust learning rate if a metric has stopped improving
-        print("val acc: {}, val ECE: {}".format(eval_accuracy, ece))
+        print("val acc: {}, val ECE: {}, val macro F1: {}, val weighted F1: {}".format(eval_accuracy, ece, macro_f1, weighted_f1))
 
         if eval_accuracy > best_val: # Store model if best performance
             if not os.path.exists(dirname):
@@ -198,20 +209,11 @@ def Trainer(train_dataloader,
             if args.model != 'bert':
                 torch.save(model.state_dict(), os.path.join(dirname, model_save))
             else:
-                if not args.ensemble and args.coeff == 0:
-                    dirname = os.path.join(dirname, 'basic')
-                elif args.ensemble and args.coeff == 0:
-                    dirname = os.path.join(dirname, 'ensemble')
-                elif not args.ensemble and args.coeff != 0:
-                    dirname = os.path.join(dirname, 'metric')
-                else:
-                    dirname = os.path.join(dirname, 'metric-ensemble')
-
                 model_to_save = model.module if hasattr(model, 'module') else model 
                 model_to_save.save_pretrained(dirname)   
 
             best_val = eval_accuracy
 
         # Test model on test data
-        eval_accuracy, ece = evaluator(prediction_dataloader, model, args)
-        print("test acc: {}, test ECE: {}".format(eval_accuracy, ece))
+        eval_accuracy, ece, macro_f1, weighted_f1 = evaluator(prediction_dataloader, model, args)
+        print("test acc: {}, test ECE: {}, test macro F1: {}, test weighted F1: {}".format(eval_accuracy, ece, macro_f1, weighted_f1))

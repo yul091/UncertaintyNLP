@@ -6,6 +6,7 @@ from utils import set_seed
 from metric import Mahalanobis
 from preprocess import process_data
 from RNN import BiGRUForSequenceClassification
+from CNN import CNN_Text
 from bert import BertEnsembleModel
 from trainer import Trainer, evaluator
 from transformers import AutoConfig
@@ -18,15 +19,12 @@ def main():
     parser.add_argument("--eval_batch_size", default=128, type=int, help="Batch size for training.")
     parser.add_argument("--epochs", default=20, type=int, help="Number of epochs for training.")
     parser.add_argument("--seed", default=0, type=int, help="Number of epochs for training.")
-    parser.add_argument("--dataset", default='20news', type=str, help="dataset")
+    parser.add_argument("--dataset", default='20news', 
+                        choices=['20news', 'sst', '20news-15', '20news-5', 'wos', 'wos-100', 'wos-34', 'agnews'], 
+                        type=str, help="dataset")
     parser.add_argument("--weight_decay", default=0, type=float, help="Weight decay if we apply some.")
-    # parser.add_argument("--beta_on", default=1., type=float, help="Weight of on manifold reg")
-    # parser.add_argument("--beta_off", default=1., type=float, help="Weight of off manifold reg")
-    # parser.add_argument("--eps_in", default=1e-4, type=float, help="Perturbation size of on-manifold regularizer")
-    # parser.add_argument("--eps_y", default=0.1, type=float, help="Perturbation size of label")
-    # parser.add_argument('--eps_out', default=0.001, type=float, help="Perturbation size of out-of-domain adversarial training")
     parser.add_argument('--saved_dataset', type=str, default='n', help='Whether save the preprocessed pt file of the dataset')
-    parser.add_argument('--model', default='bert', choices=['bert', 'rnn'], type=str, help="Model architecture for training.")
+    parser.add_argument('--model', default='bert', choices=['bert', 'cnn', 'rnn'], type=str, help="Model architecture for training.")
     parser.add_argument('--dict_path', default='glove.6B.200d.txt', type=str, help="File path of GloVe pre-trained embedding.")
     parser.add_argument('--from_scratch', action='store_true', default=False, help="Wether to train from scratch or load checkpoint.")
     parser.add_argument('--ensemble', action='store_true', default=False, help="Wether to use self-ensembling for training.")
@@ -94,6 +92,12 @@ def main():
             config=config, 
             args=args,
         )
+    elif args.model == 'cnn':
+        model = CNN_Text(
+            args=args,
+            tokenizer=tokenizer,
+            num_labels=num_labels,
+        )
     else:
         model = BiGRUForSequenceClassification(
             tokenizer=tokenizer, 
@@ -121,21 +125,29 @@ def main():
         )
     
     # Load checkpoint
-    if args.model == 'rnn':
-        # model_save = os.listdir(output_dir)[-1]
+    if args.model != 'bert':
         # Define saved model name
         if not args.ensemble and args.coeff == 0:
             model_save = 'model.pt'
         elif args.ensemble and args.coeff == 0:
-            model_save = 'model-ensemble1.0.pt'
+            model_save = 'model-ensemble{}.pt'.format(args.cross_rate)
         elif not args.ensemble and args.coeff != 0:
-            model_save = 'model-metric.pt'
+            model_save = 'model-metric{}.pt'.format(args.coeff)
         else:
-            model_save = 'model-ensemble-metric.pt'
+            model_save = 'model-ensemble{}-metric{}.pt'.format(args.cross_rate, args.coeff)
 
         ckpt_path = os.path.join(output_dir, model_save)
         model.load_state_dict(torch.load(ckpt_path))
     else:
+        if not args.ensemble and args.coeff == 0:
+            output_dir = os.path.join(output_dir, 'basic')
+        elif args.ensemble and args.coeff == 0:
+            output_dir = os.path.join(output_dir, 'ensemble')
+        elif not args.ensemble and args.coeff != 0:
+            output_dir = os.path.join(output_dir, 'metric')
+        else:
+            output_dir = os.path.join(output_dir, 'metric-ensemble')
+            
         model = BertEnsembleModel(
             output_dir, # checkpoint dir
             config=config, 
@@ -145,17 +157,17 @@ def main():
         
     
     # Evaluate
-    eval_accuracy, ece = evaluator(validation_dataloader, model, args)
-    print("(normal) val acc: {:.4f}, val ECE: {:.4f}".format(eval_accuracy, ece))
-    eval_accuracy, ece = evaluator(prediction_dataloader, model, args)
-    print("(normal) test acc: {:.4f}, test ECE: {:.4f}".format(eval_accuracy, ece))
+    eval_accuracy, ece, macro_f1, weighted_f1 = evaluator(validation_dataloader, model, args)
+    print("(normal) val acc: {:.4f}, val ECE: {:.4f}, val macro F1: {:.4f}, val weighted F1: {:.4f}".format(eval_accuracy, ece, macro_f1, weighted_f1))
+    eval_accuracy, ece, macro_f1, weighted_f1 = evaluator(prediction_dataloader, model, args)
+    print("(normal) test acc: {:.4f}, test ECE: {:.4f}, test macro F1: {:.4f}, test weighted F1: {:.4f}".format(eval_accuracy, ece, macro_f1, weighted_f1))
 
     # Test transform
     MD = Mahalanobis(train_dataloader, model, num_labels, args)
-    eval_accuracy, ece = evaluator(validation_dataloader, model, args, Mahala=MD, use_transform=True)
-    print("(transformed) val acc: {:.4f}, val ECE: {:.4f}".format(eval_accuracy, ece))
-    eval_accuracy, ece = evaluator(prediction_dataloader, model, args, Mahala=MD, use_transform=True)
-    print("(transformed) test acc: {:.4f}, test ECE: {:.4f}".format(eval_accuracy, ece))
+    eval_accuracy, ece, macro_f1, weighted_f1 = evaluator(validation_dataloader, model, args, Mahala=MD, use_transform=True)
+    print("(transformed) val acc: {:.4f}, val ECE: {:.4f}, val macro F1: {:.4f}, val weighted F1: {:.4f}".format(eval_accuracy, ece, macro_f1, weighted_f1))
+    eval_accuracy, ece, macro_f1, weighted_f1 = evaluator(prediction_dataloader, model, args, Mahala=MD, use_transform=True)
+    print("(transformed) test acc: {:.4f}, test ECE: {:.4f}, test macro F1: {:.4f}, test weighted F1: {:.4f}".format(eval_accuracy, ece, macro_f1, weighted_f1))
 
 
 

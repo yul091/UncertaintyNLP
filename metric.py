@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score
 # from sklearn.neural_network import MLPRegressor
 
 
@@ -13,6 +14,11 @@ def accurate_nb(preds, labels):
     pred_flat = np.argmax(preds, axis=-1).flatten()
     labels_flat = labels.flatten()
     return np.sum(pred_flat == labels_flat)
+
+def calculate_F1(preds, labels, average='macro'):
+    pred_flat = np.argmax(preds, axis=-1).flatten()
+    labels_flat = labels.flatten()
+    return f1_score(labels_flat, pred_flat, average=average)
 
 
 # Define ECE
